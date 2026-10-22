@@ -1,0 +1,66 @@
+# Single-VPS production stack (~€4–6/month on a 2 vCPU / 4 GB box, e.g. Hetzner CX22).
+#   cp .env.example .env.production   # fill in secrets, APP_URL=https://your.domain
+#   docker compose -f deploy/docker-compose.prod.yml --env-file .env.production up -d --build
+services:
+  app:
+    build: ..
+    restart: unless-stopped
+    env_file: ../.env.production
+    environment:
+      DATABASE_URL: postgresql://foodshare:${POSTGRES_PASSWORD}@db:5432/foodshare
+      ENABLE_INTERNAL_CRON: "true"   # one container = one scheduler, no external cron needed
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - uploads:/app/.uploads         # only used when STORAGE_DRIVER=local
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 30s
+      retries: 3
+
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: foodshare
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: foodshare
+    command: ["postgres", "-c", "shared_buffers=256MB", "-c", "max_connections=50"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U foodshare"]
+      interval: 5s
+      retries: 10
+
+  caddy:
+    # Automatic HTTPS (Let's Encrypt) and HTTP/3, zero config.
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports: ["80:80", "443:443", "443:443/udp"]
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    depends_on: [app]
+
+  backup:
+    # Nightly pg_dump, gzip, keep 14 days locally. Sync the folder to R2 with rclone for off-site copies.
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    volumes: [backups:/backups]
+    entrypoint: >
+      sh -c 'while true; do
+        pg_dump -h db -U foodshare foodshare | gzip > /backups/foodshare-$$(date +%F).sql.gz;
+        find /backups -name "*.sql.gz" -mtime +14 -delete;
+        sleep 86400; done'
+    depends_on: [db]
+
+volumes:
+  pgdata:
+  uploads:
+  caddy_data:
+  backups:

@@ -1,0 +1,10 @@
+{
+  "name": "FoodShare",
+  "short_name": "FoodShare",
+  "description": "Rescue surplus food near you",
+  "start_url": "/browse",
+  "display": "standalone",
+  "background_color": "#f7f8f6",
+  "theme_color": "#1f8048",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}

@@ -1,0 +1,722 @@
+// FoodShare Pro — data model
+// Portable Postgres (no extensions required) so it runs on Neon, Supabase,
+// RDS or a container on a $5 VPS. Geo search uses indexed lat/lng + haversine.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Identity ────────────────────────────────────────────────────────────
+
+enum AccountType {
+  INDIVIDUAL
+  BUSINESS
+  NGO
+}
+
+enum Role {
+  USER
+  MODERATOR
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  DELETED
+}
+
+model User {
+  id              String      @id @default(cuid())
+  email           String      @unique
+  emailVerifiedAt DateTime?
+  passwordHash    String
+  name            String
+  phone           String?
+  accountType     AccountType @default(INDIVIDUAL)
+  role            Role        @default(USER)
+  status          UserStatus  @default(ACTIVE)
+  suspendedUntil  DateTime?
+  isVolunteer     Boolean     @default(false)
+
+  city String?
+  lat  Float?
+  lng  Float?
+
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+
+  // Trust & reliability
+  ratingAvg      Float @default(0)
+  ratingCount    Int   @default(0)
+  noShowStrikes  Int   @default(0)
+  completedCount Int   @default(0)
+
+  // Notification preferences
+  notifyEmail Boolean @default(true)
+  notifyPush  Boolean @default(true)
+  emailDigest Boolean @default(true)
+
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  lastSeenAt DateTime?
+
+  sessions          Session[]
+  tokens            AuthToken[]
+  listings          Listing[]
+  claims            Claim[]            @relation("ClaimClaimant")
+  deliveries        DeliveryTask[]
+  messages          Message[]
+  reviewsWritten    Review[]           @relation("ReviewAuthor")
+  reviewsReceived   Review[]           @relation("ReviewSubject")
+  reports           Report[]           @relation("ReportReporter")
+  notifications     Notification[]
+  pushSubscriptions PushSubscription[]
+  alerts            AlertPreference[]
+  orders            Order[]
+  payouts           Payout[]
+  sponsorships      Sponsorship[]
+  schedules         RecurringSchedule[]
+
+  @@index([status])
+  @@index([isVolunteer, lat, lng])
+}
+
+model Session {
+  id         String   @id // sha256(token) — raw token only lives in the cookie
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  userAgent  String?
+  ip         String?
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+enum AuthTokenType {
+  EMAIL_VERIFY
+  PASSWORD_RESET
+}
+
+model AuthToken {
+  id        String        @id @default(cuid())
+  userId    String
+  user      User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      AuthTokenType
+  tokenHash String        @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime      @default(now())
+
+  @@index([userId, type])
+}
+
+// ─── Organisations (restaurants, grocers, NGOs, shelters, sponsors) ─────
+
+enum OrgKind {
+  BUSINESS
+  NGO
+}
+
+enum VerificationStatus {
+  UNVERIFIED
+  PENDING
+  VERIFIED
+  REJECTED
+}
+
+enum Plan {
+  FREE
+  PRO
+  ENTERPRISE
+}
+
+model Organization {
+  id                 String             @id @default(cuid())
+  name               String
+  kind               OrgKind
+  category           String // restaurant, grocery, caterer, shelter, food_bank, community_fridge…
+  description        String?
+  website            String?
+  phone              String?
+  registrationNumber String? // FSSAI licence / NGO reg no. / EIN
+  taxExemptId        String? // 80G / 12A / 501(c)(3)
+  verificationStatus VerificationStatus @default(UNVERIFIED)
+  verifiedAt         DateTime?
+  rejectionReason    String?
+
+  plan               Plan      @default(FREE)
+  planRenewsAt       DateTime?
+  planReminderSentAt DateTime?
+
+  // Where payouts go (UPI ID / bank ref). Encrypt at rest in production.
+  payoutDetails String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  members   User[]
+  locations Location[]
+  listings  Listing[]
+  documents VerificationDocument[]
+  orders    Order[]
+
+  @@index([kind, verificationStatus])
+}
+
+model Location {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  label          String
+  address        String
+  city           String?
+  lat            Float
+  lng            Float
+  isDefault      Boolean      @default(false)
+  createdAt      DateTime     @default(now())
+  listings       Listing[]
+}
+
+enum DocStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model VerificationDocument {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  docType        String // registration_certificate, fssai_licence, tax_exemption, id_proof
+  fileKey        String // private storage key
+  status         DocStatus    @default(PENDING)
+  reviewerId     String?
+  reviewNote     String?
+  createdAt      DateTime     @default(now())
+  reviewedAt     DateTime?
+
+  @@index([status])
+}
+
+// ─── Listings ────────────────────────────────────────────────────────────
+
+enum ListingMode {
+  DONATION // free
+  SALE // discounted surplus, platform takes a commission
+}
+
+enum ListingStatus {
+  DRAFT
+  ACTIVE
+  RESERVED // fully claimed, awaiting pickup
+  COMPLETED
+  EXPIRED
+  CANCELLED
+  REMOVED // taken down by moderation
+}
+
+enum FoodCategory {
+  PREPARED_MEAL
+  BAKERY
+  PRODUCE
+  DAIRY
+  PACKAGED
+  BEVERAGES
+  GROCERY
+  MIXED
+}
+
+enum DietType {
+  VEGETARIAN
+  VEGAN
+  EGGETARIAN
+  NON_VEGETARIAN
+}
+
+enum StorageType {
+  HOT
+  AMBIENT
+  CHILLED
+  FROZEN
+}
+
+enum Audience {
+  EVERYONE
+  VERIFIED_NGO_ONLY
+}
+
+model Listing {
+  id             String        @id @default(cuid())
+  ownerId        String
+  owner          User          @relation(fields: [ownerId], references: [id])
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+  locationId     String?
+  location       Location?     @relation(fields: [locationId], references: [id])
+  scheduleId     String?
+  schedule       RecurringSchedule? @relation(fields: [scheduleId], references: [id])
+
+  mode   ListingMode   @default(DONATION)
+  status ListingStatus @default(ACTIVE)
+
+  title       String
+  description String?
+  category    FoodCategory
+  dietType    DietType
+  allergens   String[]
+  tags        String[] // halal, jain, gluten_free, organic…
+
+  quantityTotal     Int
+  quantityAvailable Int
+  unit              String // portions, kg, items, boxes
+  weightKgPerUnit   Float  @default(0.4) // drives impact metrics
+
+  priceCents         Int    @default(0)
+  originalPriceCents Int? // retail value → discount % and tax/CSR certificates
+  currency           String
+
+  storage    StorageType
+  preparedAt DateTime?
+  expiresAt  DateTime
+  pickupStart DateTime
+  pickupEnd   DateTime
+
+  // Snapshot of pickup location (owner may edit their Location later)
+  address            String
+  city               String?
+  lat                Float
+  lng                Float
+  pickupInstructions String?
+
+  photoKeys String[]
+
+  audience         Audience  @default(EVERYONE)
+  ngoPriorityUntil DateTime? // only verified NGOs may claim before this time
+  requiresApproval Boolean   @default(false)
+  allowsDelivery   Boolean   @default(true)
+  maxPerClaim      Int?
+  safetyAck        Boolean   @default(false)
+
+  viewCount      Int       @default(0)
+  expiryWarnedAt DateTime?
+  publishedAt    DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  claims  Claim[]
+
+  @@index([status, lat, lng])
+  @@index([status, expiresAt])
+  @@index([status, pickupEnd])
+  @@index([ownerId, status])
+  @@index([organizationId, status])
+}
+
+model RecurringSchedule {
+  id             String   @id @default(cuid())
+  ownerId        String
+  owner          User     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  organizationId String?
+  // Listing template: everything except concrete dates.
+  template       Json
+  daysOfWeek     Int[] // 0 = Sunday
+  publishAt      String // "HH:mm" local time
+  pickupStartMin Int // minutes after publish
+  pickupEndMin   Int
+  expiresMin     Int
+  tzOffsetMin    Int      @default(330) // owner's UTC offset (IST default)
+  active         Boolean  @default(true)
+  nextRunAt      DateTime
+  lastRunAt      DateTime?
+  createdAt      DateTime @default(now())
+  listings       Listing[]
+
+  @@index([active, nextRunAt])
+}
+
+// ─── Claims & fulfilment ────────────────────────────────────────────────
+
+enum ClaimStatus {
+  PENDING_PAYMENT // SALE: quantity held until holdExpiresAt
+  PENDING_APPROVAL // donor reviews claimant (e.g. large NGO pickups)
+  CONFIRMED
+  IN_DELIVERY // volunteer has collected it
+  COMPLETED
+  CANCELLED
+  REJECTED
+  NO_SHOW
+  EXPIRED
+}
+
+enum Fulfilment {
+  SELF_PICKUP
+  VOLUNTEER_DELIVERY
+}
+
+model Claim {
+  id         String      @id @default(cuid())
+  listingId  String
+  listing    Listing     @relation(fields: [listingId], references: [id])
+  claimantId String
+  claimant   User        @relation("ClaimClaimant", fields: [claimantId], references: [id])
+  quantity   Int
+  status     ClaimStatus
+  fulfilment Fulfilment  @default(SELF_PICKUP)
+  note       String?
+
+  // Handover verification: claimant/volunteer shows this, donor enters it.
+  pickupCode   String
+  codeAttempts Int    @default(0)
+
+  // Volunteer delivery destination
+  dropAddress String?
+  dropLat     Float?
+  dropLng     Float?
+
+  holdExpiresAt  DateTime?
+  confirmedAt    DateTime?
+  completedAt    DateTime?
+  cancelledAt    DateTime?
+  cancelledById  String?
+  cancelReason   String?
+  reminderSentAt DateTime?
+
+  // Impact snapshot computed at completion
+  kgSaved  Float?
+  meals    Float?
+  co2eKg   Float?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  order    Order?
+  delivery DeliveryTask?
+  messages Message[]
+  reviews  Review[]
+
+  @@index([listingId, status])
+  @@index([claimantId, status])
+  @@index([status, holdExpiresAt])
+  @@index([status, completedAt])
+}
+
+enum DeliveryStatus {
+  OPEN
+  ACCEPTED
+  PICKED_UP
+  DELIVERED
+  CANCELLED
+}
+
+model DeliveryTask {
+  id          String         @id @default(cuid())
+  claimId     String         @unique
+  claim       Claim          @relation(fields: [claimId], references: [id])
+  volunteerId String?
+  volunteer   User?          @relation(fields: [volunteerId], references: [id])
+  status      DeliveryStatus @default(OPEN)
+  pickupLat   Float
+  pickupLng   Float
+  dropLat     Float
+  dropLng     Float
+  distanceKm  Float
+  dropCode    String // recipient shows this to the volunteer on arrival
+  stipendCents Int?
+  acceptedAt  DateTime?
+  pickedUpAt  DateTime?
+  deliveredAt DateTime?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  @@index([status, pickupLat, pickupLng])
+  @@index([volunteerId, status])
+}
+
+model Message {
+  id        String   @id @default(cuid())
+  claimId   String
+  claim     Claim    @relation(fields: [claimId], references: [id], onDelete: Cascade)
+  senderId  String
+  sender    User     @relation(fields: [senderId], references: [id])
+  body      String
+  createdAt DateTime @default(now())
+
+  @@index([claimId, createdAt])
+}
+
+// ─── Trust & safety ─────────────────────────────────────────────────────
+
+model Review {
+  id        String   @id @default(cuid())
+  claimId   String
+  claim     Claim    @relation(fields: [claimId], references: [id], onDelete: Cascade)
+  authorId  String
+  author    User     @relation("ReviewAuthor", fields: [authorId], references: [id])
+  subjectId String
+  subject   User     @relation("ReviewSubject", fields: [subjectId], references: [id])
+  rating    Int
+  tags      String[]
+  comment   String?
+  createdAt DateTime @default(now())
+
+  @@unique([claimId, authorId])
+  @@index([subjectId])
+}
+
+enum ReportTarget {
+  LISTING
+  USER
+  CLAIM
+}
+
+enum ReportReason {
+  FOOD_SAFETY
+  NO_SHOW
+  MISREPRESENTED
+  HARASSMENT
+  FRAUD
+  OTHER
+}
+
+enum ReportStatus {
+  OPEN
+  ACTIONED
+  DISMISSED
+}
+
+model Report {
+  id             String       @id @default(cuid())
+  reporterId     String
+  reporter       User         @relation("ReportReporter", fields: [reporterId], references: [id])
+  targetType     ReportTarget
+  targetId       String
+  reason         ReportReason
+  details        String?
+  status         ReportStatus @default(OPEN)
+  resolverId     String?
+  resolutionNote String?
+  createdAt      DateTime     @default(now())
+  resolvedAt     DateTime?
+
+  @@index([status, createdAt])
+  @@index([targetType, targetId])
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?
+  action     String
+  entityType String
+  entityId   String
+  meta       Json?
+  createdAt  DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([createdAt])
+}
+
+// ─── Notifications ──────────────────────────────────────────────────────
+
+model Notification {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      String
+  title     String
+  body      String
+  link      String?
+  readAt    DateTime?
+  emailedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId, readAt])
+  @@index([userId, createdAt])
+}
+
+model PushSubscription {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  createdAt DateTime @default(now())
+}
+
+// Saved search: "tell me when vegetarian meals appear within 5 km"
+model AlertPreference {
+  id         String         @id @default(cuid())
+  userId     String
+  user       User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  label      String
+  lat        Float
+  lng        Float
+  radiusKm   Float
+  categories FoodCategory[]
+  dietTypes  DietType[]
+  modes      ListingMode[]
+  active     Boolean        @default(true)
+  createdAt  DateTime       @default(now())
+
+  @@index([active, lat, lng])
+}
+
+// ─── Money ──────────────────────────────────────────────────────────────
+
+enum OrderKind {
+  LISTING_PURCHASE
+  SUBSCRIPTION
+  SPONSORSHIP
+  PLATFORM_TIP
+}
+
+enum OrderStatus {
+  CREATED
+  PAID
+  FAILED
+  REFUNDED
+  EXPIRED
+}
+
+model Order {
+  id                String      @id @default(cuid())
+  userId            String
+  user              User        @relation(fields: [userId], references: [id])
+  kind              OrderKind
+  status            OrderStatus @default(CREATED)
+  provider          String
+  providerOrderId   String?     @unique
+  providerPaymentId String?
+  amountCents       Int // total charged
+  currency          String
+  platformFeeCents  Int         @default(0)
+  tipCents          Int         @default(0)
+  payeeAmountCents  Int         @default(0) // seller share
+  claimId           String?     @unique
+  claim             Claim?      @relation(fields: [claimId], references: [id])
+  organizationId    String?
+  organization      Organization? @relation(fields: [organizationId], references: [id])
+  plan              Plan?
+  periodMonths      Int?
+  sponsorshipId     String?     @unique
+  sponsorship       Sponsorship? @relation(fields: [sponsorshipId], references: [id])
+  createdAt         DateTime    @default(now())
+  paidAt            DateTime?
+  refundedAt        DateTime?
+
+  ledger LedgerEntry[]
+
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+}
+
+// Append-only ledger. Balance of an account = SUM(amountCents).
+// Accounts: "user:<id>" (sellers / volunteers), "fund:rescue" (sponsor money
+// that pays volunteer stipends), "platform:revenue".
+model LedgerEntry {
+  id          String   @id @default(cuid())
+  account     String
+  amountCents Int
+  currency    String
+  type        String // SALE_CREDIT, PLATFORM_FEE, TIP, SUBSCRIPTION, SPONSOR_FUND, STIPEND, PAYOUT, REFUND
+  orderId     String?
+  order       Order?   @relation(fields: [orderId], references: [id])
+  refId       String? // claim / payout id
+  memo        String?
+  createdAt   DateTime @default(now())
+
+  @@index([account, createdAt])
+}
+
+enum PayoutStatus {
+  REQUESTED
+  PAID
+  REJECTED
+}
+
+model Payout {
+  id          String       @id @default(cuid())
+  userId      String
+  user        User         @relation(fields: [userId], references: [id])
+  amountCents Int
+  currency    String
+  destination String // UPI / bank reference supplied by the user
+  status      PayoutStatus @default(REQUESTED)
+  reference   String? // bank transfer UTR / transaction id
+  note        String?
+  createdAt   DateTime     @default(now())
+  processedAt DateTime?
+
+  @@index([status, createdAt])
+  @@index([userId])
+}
+
+enum SponsorshipStatus {
+  PENDING
+  ACTIVE
+}
+
+model Sponsorship {
+  id          String            @id @default(cuid())
+  sponsorId   String
+  sponsor     User              @relation(fields: [sponsorId], references: [id])
+  displayName String
+  message     String?
+  website     String?
+  amountCents Int
+  currency    String
+  deliveriesFunded Int
+  status      SponsorshipStatus @default(PENDING)
+  createdAt   DateTime          @default(now())
+  order       Order?
+
+  @@index([status, createdAt])
+}
+
+// ─── Infrastructure ─────────────────────────────────────────────────────
+
+enum JobStatus {
+  PENDING
+  RUNNING
+  DONE
+  FAILED
+}
+
+// Postgres-backed queue (SKIP LOCKED) — no Redis bill.
+model Job {
+  id          String    @id @default(cuid())
+  type        String
+  payload     Json
+  status      JobStatus @default(PENDING)
+  runAt       DateTime  @default(now())
+  attempts    Int       @default(0)
+  maxAttempts Int       @default(5)
+  lockedAt    DateTime?
+  lastError   String?
+  createdAt   DateTime  @default(now())
+
+  @@index([status, runAt])
+}
+
+model GeocodeCache {
+  query       String   @id
+  lat         Float
+  lng         Float
+  displayName String
+  city        String?
+  createdAt   DateTime @default(now())
+}
+
+model RateLimit {
+  key       String   @id
+  count     Int
+  resetAt   DateTime
+}

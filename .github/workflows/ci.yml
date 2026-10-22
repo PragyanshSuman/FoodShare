@@ -1,0 +1,34 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env: { POSTGRES_USER: foodshare, POSTGRES_PASSWORD: foodshare, POSTGRES_DB: foodshare }
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://foodshare:foodshare@localhost:5432/foodshare
+      APP_URL: http://localhost:3000
+      APP_SECRET: ci-secret-ci-secret-ci-secret-ci-secret
+      CRON_SECRET: ci-cron
+      PAYMENT_PROVIDER: mock
+      ALLOW_MOCK_PAYMENTS: "true"
+      ENABLE_INTERNAL_CRON: "false"
+      SMTP_URL: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npx prisma migrate deploy
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: End-to-end smoke test
+        run: |
+          npx next start -p 3000 &
+          npx wait-on -t 60000 http://localhost:3000/api/health
+          npm run smoke

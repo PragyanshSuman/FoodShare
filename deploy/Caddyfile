@@ -1,0 +1,14 @@
+{$DOMAIN} {
+	encode zstd gzip
+
+	# Overwrite (never append) the client IP header so rate limits can't be spoofed.
+	reverse_proxy app:3000 {
+		header_up X-Real-IP {remote_host}
+	}
+
+	# Long cache for hashed build assets.
+	@static path /_next/static/*
+	header @static Cache-Control "public, max-age=31536000, immutable"
+
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+}
