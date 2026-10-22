@@ -1,6 +1,7 @@
 # Free scheduler for serverless deployments (Vercel / Netlify / Cloudflare), where
 # no process stays alive to run ENABLE_INTERNAL_CRON. Not needed on a VPS.
-# Repo secrets: APP_URL (https://your.domain) and CRON_SECRET.
+# To turn on: repo Settings → Secrets: APP_URL (https://your.domain), CRON_SECRET;
+#             Settings → Variables: CRON_ENABLED = true
 name: cron
 on:
   schedule:
@@ -8,7 +9,13 @@ on:
   workflow_dispatch:
 jobs:
   tick:
+    if: vars.CRON_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
-      - run: curl -fsS -m 120 -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" "${{ secrets.APP_URL }}/api/cron"
+      - name: Run sweep and job queue
+        env:
+          APP_URL: ${{ secrets.APP_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          curl -fsS -m 120 -H "Authorization: Bearer $CRON_SECRET" "$APP_URL/api/cron"
